@@ -1,0 +1,6 @@
+game
+*.bin
+player.dat
+.vscode/
+
+raylib/
