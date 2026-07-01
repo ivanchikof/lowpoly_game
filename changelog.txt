@@ -1,6 +1,7 @@
-v1.0.0
+v1.0.1
 2026-07-01
 - Added realistic water level physics (Minecraft style)
 - Implemented smooth liquid decay and drying
 - Added dynamic day and night cycle with shifting shadows
 Testing the auto-update button!
+- Fixed textures and added client auto-updater.
