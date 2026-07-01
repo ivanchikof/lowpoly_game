@@ -5,17 +5,20 @@
 #include <fstream>
 #include <iostream>
 #include <cmath>
+#include <string>
+#include <vector>
+#include <cstdlib> // Потрібно для функції system()
 
 // --- ОНОВЛЕНИЙ ШЕЙДЕР З ПІДТРИМКОЮ РУХОМОГО СОНЦЯ ---
 const char* vsSource = R"(
     #version 330
     in vec3 vertexPosition;
     in vec2 vertexTexCoord;
-    in vec3 vertexNormal; // Передаємо нормаль (напрямок грані)
+    in vec3 vertexNormal; 
     in vec4 vertexColor;
     out vec2 fragTexCoord;
     out vec4 fragColor;
-    out vec3 fragNormal;  // Передаємо нормаль у фрагментний шейдер
+    out vec3 fragNormal;  
     uniform mat4 mvp;
     void main() {
         fragTexCoord = vertexTexCoord;
@@ -32,20 +35,17 @@ const char* fsSource = R"(
     in vec3 fragNormal;
     out vec4 finalColor;
     uniform sampler2D texture0;
-    uniform vec3 sunDir;    // Напрямок сонця (передається з C++)
-    uniform float ambient;  // Загальна яскравість світу (день/ніч)
+    uniform vec3 sunDir;    
+    uniform float ambient;  
     void main() {
         vec4 texelColor = texture(texture0, fragTexCoord);
         if (texelColor.a < 0.1) discard; 
         
-        // Рахуємо, наскільки сонце освітлює цю конкретність грань
         float dotProduct = dot(normalize(fragNormal), normalize(sunDir));
         float lightIntensity = max(dotProduct, 0.0);
         
-        // Змішуємо розсіяне світло (ambient) та пряме світло сонця
         float totalLight = ambient + lightIntensity * (1.0 - ambient);
         
-        // Множимо текстуру на динамічне світло сонця ТА на статичну тінь дерев (fragColor)
         finalColor = texelColor * fragColor * vec4(vec3(totalLight), 1.0);
     }
 )";
@@ -117,9 +117,8 @@ int main() {
     voxelShader.locs[SHADER_LOC_VERTEX_POSITION] = GetShaderLocation(voxelShader, "vertexPosition");
     voxelShader.locs[SHADER_LOC_VERTEX_TEXCOORD01] = GetShaderLocation(voxelShader, "vertexTexCoord");
     voxelShader.locs[SHADER_LOC_VERTEX_COLOR] = GetShaderLocation(voxelShader, "vertexColor");
-    voxelShader.locs[SHADER_LOC_VERTEX_NORMAL] = GetShaderLocation(voxelShader, "vertexNormal"); // Передаємо нормалі!
+    voxelShader.locs[SHADER_LOC_VERTEX_NORMAL] = GetShaderLocation(voxelShader, "vertexNormal"); 
     
-    // Отримуємо посилання на змінні всередині шейдера
     int sunDirLoc = GetShaderLocation(voxelShader, "sunDir");
     int ambientLoc = GetShaderLocation(voxelShader, "ambient");
     
@@ -141,8 +140,46 @@ int main() {
     int* keyToBind = nullptr; 
 
     // --- НАЛАШТУВАННЯ ЧАСУ ---
-    float timeOfDay = 450.0f; // Починаємо вранці
-    const float DAY_LENGTH = 1800.0f; // 1800 секунд = 30 хвилин. (Постав 60.0f для швидкого тесту!)
+    float timeOfDay = 450.0f; 
+    const float DAY_LENGTH = 1800.0f; 
+    
+    // 1. Читання ЛОКАЛЬНОГО логу оновлень програми
+    std::vector<std::string> changelogLines;
+    std::ifstream changelogFile("changelog.txt");
+    if (changelogFile.is_open()) {
+        std::string line;
+        while (std::getline(changelogFile, line)) {
+            changelogLines.push_back(line);
+        }
+        changelogFile.close();
+    }
+
+    // 2. СИСТЕМА ПЕРЕВІРКИ ОНОВЛЕНЬ ЧЕРЕЗ ІНТЕРНЕТ
+    bool updateAvailable = false;
+    std::string remoteVersion = "";
+    std::vector<std::string> remoteChangelog;
+
+    std::cout << "Checking for updates via internet..." << std::endl;
+    // Завантажуємо актуальний файл changelog.txt з GitHub у тимчасовий файл
+    int ret = system("curl -s https://raw.githubusercontent.com/ivanchikof/lowpoly_game/main/changelog.txt -o remote_changelog.txt");
+    
+    if (ret == 0) { 
+        std::ifstream remoteFile("remote_changelog.txt");
+        if (remoteFile.is_open()) {
+            std::getline(remoteFile, remoteVersion); // Перший рядок сервера — це остання версія
+            
+            // Якщо версія на сервері не збігається з нашою поточною константою GAME_VERSION
+            if (!remoteVersion.empty() && remoteVersion != GAME_VERSION) {
+                updateAvailable = true; 
+                
+                std::string rLine;
+                while (std::getline(remoteFile, rLine)) {
+                    remoteChangelog.push_back(rLine); // Збираємо опис фіч нового апдейту
+                }
+            }
+            remoteFile.close();
+        }
+    }
 
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
@@ -158,7 +195,6 @@ int main() {
             world.Update(player.position);
             world.UpdateFluids(dt);
             
-            // Рух часу
             timeOfDay += dt;
             if (timeOfDay >= DAY_LENGTH) timeOfDay = 0.0f;
 
@@ -171,35 +207,29 @@ int main() {
 
         // --- МАТЕМАТИКА СОНЦЯ ТА НЕБА ---
         float angle = (timeOfDay / DAY_LENGTH) * 2.0f * PI;
-        // Сонце обертається по колу (X та Y)
         Vector3 sunDir = { cosf(angle), sinf(angle), 0.3f }; 
         
-        // Розраховуємо яскравість світу (ambient). Сонце вгорі = яскраво (0.8), сонце внизу = ніч (0.15)
         float ambient = 0.15f + fmaxf(0.0f, sunDir.y) * 0.65f;
         
-        // Кольори для плавного неба
         Color dayColor = SKYBLUE;
         Color nightColor = (Color){10, 14, 28, 255};
         Color sunsetColor = (Color){230, 90, 40, 255};
         
         Color currentSkyColor;
-        // Плавний перехід кольору неба залежно від висоти сонця (sunDir.y)
-        float skyT = (sunDir.y + 1.0f) * 0.5f; // Переводимо з [-1, 1] в [0, 1]
+        float skyT = (sunDir.y + 1.0f) * 0.5f; 
         currentSkyColor = LerpColor(nightColor, dayColor, skyT);
         
-        // Додаємо красивий помаранчевий відтінок під час заходу/сходу
         if (sunDir.y > -0.2f && sunDir.y < 0.2f) {
             float sunsetFactor = 1.0f - (fabs(sunDir.y) / 0.2f);
             currentSkyColor = LerpColor(currentSkyColor, sunsetColor, sunsetFactor * 0.8f);
         }
 
-        // Відправляємо дані про сонце у шейдер перед малюванням світу
         SetShaderValue(voxelShader, sunDirLoc, &sunDir, SHADER_UNIFORM_VEC3);
         SetShaderValue(voxelShader, ambientLoc, &ambient, SHADER_UNIFORM_FLOAT);
 
         // --- РЕНДЕР СВІТУ ---
         BeginDrawing(); 
-        ClearBackground(currentSkyColor); // Динамічне небо!
+        ClearBackground(currentSkyColor); 
         
         BeginMode3D(player.camera);
             rlDisableBackfaceCulling();
@@ -236,12 +266,6 @@ int main() {
                 DrawText(TextFormat("%d", i + 1), slotX + 5, startY + 5, 10, WHITE);
             }
 
-            /*Виводимо поточний час доби на екран для зручності
-            int hours = (int)((timeOfDay / DAY_LENGTH) * 24.0f);
-            int minutes = (int)(((timeOfDay / DAY_LENGTH) * 24.0f - hours) * 60.0f);
-            DrawText(TextFormat("Time: %02d:%02d", hours, minutes), 10, 80, 20, WHITE);
-            */ 
-            
             if (saveMessageTimer > 0) {
                 DrawText("GAME SAVED!", 20, GetScreenHeight() - 40, 20, GREEN);
                 saveMessageTimer -= dt;
@@ -251,14 +275,27 @@ int main() {
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), {0, 0, 0, 150}); 
             DrawText("PAUSED", cx - MeasureText("PAUSED", 40)/2, cy - 150, 40, WHITE);
             
-            if (DrawButton(cx - 100, cy - 50, 200, 40, "Resume")) { gameState = STATE_PLAYING; DisableCursor(); }
-            if (DrawButton(cx - 100, cy, 200, 40, "Manual Save")) {
+            if (DrawButton(cx - 100, cy - 80, 200, 40, "Resume")) { gameState = STATE_PLAYING; DisableCursor(); }
+            if (DrawButton(cx - 100, cy - 35, 200, 40, "Manual Save")) {
                 world.SaveAll(); SaveGameInfo(player);
                 saveMessageTimer = 3.0f; gameState = STATE_PLAYING; DisableCursor();
             }
-            if (DrawButton(cx - 100, cy + 50, 200, 40, "Graphics")) gameState = STATE_SETTINGS_GRAPHICS;
-            if (DrawButton(cx - 100, cy + 100, 200, 40, "Controls")) gameState = STATE_SETTINGS_CONTROLS;
-            if (DrawButton(cx - 100, cy + 150, 200, 40, "Quit")) break; 
+            if (DrawButton(cx - 100, cy + 10, 200, 40, "Graphics")) gameState = STATE_SETTINGS_GRAPHICS;
+            if (DrawButton(cx - 100, cy + 55, 200, 40, "Controls")) gameState = STATE_SETTINGS_CONTROLS;
+            
+            // ДИНАМІЧНА КНОПКА ОНОВЛЕННЯ З ПРАПОРЦЕМ
+            if (updateAvailable) {
+                DrawCircle(cx - 120, cy + 120, 7, RED); // Червоний індикатор-сповіщення
+                if (DrawButton(cx - 100, cy + 100, 200, 40, "NEW UPDATE!")) {
+                    gameState = STATE_UPDATE_PROMPT;
+                }
+            } else {
+                if (DrawButton(cx - 100, cy + 100, 200, 40, "Updates & History")) {
+                    gameState = STATE_CHANGELOG;
+                }
+            }
+            
+            if (DrawButton(cx - 100, cy + 145, 200, 40, "Quit")) break; 
         }
         else if (gameState == STATE_SETTINGS_GRAPHICS) {
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), {0, 0, 0, 180});
@@ -285,6 +322,61 @@ int main() {
 
                 if (DrawButton(cx - 100, sy + 300, 200, 40, "Back")) { SaveGameInfo(player); gameState = STATE_MENU; }
             }
+        }
+        else if (gameState == STATE_CHANGELOG) {
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), { 20, 20, 25, 255 }); 
+            DrawText("UPDATES & HISTORY", cx - MeasureText("UPDATES & HISTORY", 30) / 2, 40, 30, RAYWHITE);
+            
+            int posY = 120;
+            for (const auto& line : changelogLines) {
+                if (!line.empty() && line[0] == 'v') {
+                    DrawText(line.c_str(), cx - 250, posY, 22, GOLD);
+                    posY += 30;
+                } else {
+                    DrawText(line.c_str(), cx - 230, posY, 18, LIGHTGRAY);
+                    posY += 25;
+                }
+            }
+            if (DrawButton(cx - 100, GetScreenHeight() - 60, 200, 40, "Back")) gameState = STATE_MENU;
+        }
+        else if (gameState == STATE_UPDATE_PROMPT) {
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), { 25, 22, 22, 255 }); 
+            DrawText("NEW UPDATE AVAILABLE!", cx - MeasureText("NEW UPDATE AVAILABLE!", 32) / 2, 40, 32, RED);
+            
+            std::string verText = "Current: " + GAME_VERSION + "  ->  Latest: " + remoteVersion;
+            DrawText(verText.c_str(), cx - MeasureText(verText.c_str(), 20) / 2, 95, 20, GOLD);
+            
+            int posY = 160;
+            DrawText("What's new in this version:", cx - 250, posY, 20, GRAY);
+            posY += 35;
+            
+            for (const auto& line : remoteChangelog) {
+                DrawText(line.c_str(), cx - 230, posY, 18, LIGHTGRAY);
+                posY += 25;
+            }
+            
+            // ЛОГІКА СКАЧУВАННЯ ТА СКРИПТА САМОЗАМІНИ БІНАРНИКА
+            if (DrawButton(cx - 220, GetScreenHeight() - 80, 200, 40, "Install Now")) {
+                std::cout << "Downloading update..." << std::endl;
+                // Стягуємо оновлений бінарник гри з GitHub
+                system("curl -s -L https://raw.githubusercontent.com/ivanchikof/lowpoly_game/main/game -o game.new");
+                
+                std::ofstream script("updater.sh");
+                if (script.is_open()) {
+                    script << "#!/bin/bash\n";
+                    script << "sleep 1.0\n";         // Чекаємо закриття старої гри
+                    script << "mv game.new game\n"; // Перейменовуємо файл на актуальний
+                    script << "chmod +x game\n";    // Робимо бінарник виконуваним
+                    script << "./game &\n";         // Запускаємо оновлену гру
+                    script << "rm updater.sh\n";    // Видаляємо тимчасовий скрипт самозаміни
+                    script.close();
+                    
+                    system("chmod +x updater.sh");
+                    system("./updater.sh &"); // Запуск скрипта у фоні системи
+                    break;                    // Закриваємо поточну програму
+                }
+            }
+            if (DrawButton(cx + 20, GetScreenHeight() - 80, 200, 40, "Later")) gameState = STATE_MENU;
         }
 
         DrawFPS(10, 10);
