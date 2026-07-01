@@ -3,3 +3,4 @@ v1.0.0
 - Added realistic water level physics (Minecraft style)
 - Implemented smooth liquid decay and drying
 - Added dynamic day and night cycle with shifting shadows
+Testing the auto-update button!
